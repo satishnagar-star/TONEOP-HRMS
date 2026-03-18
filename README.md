@@ -1,4 +1,4 @@
-# MINI HRMS – Attendance Management System
+# Toneop-HRMS – Attendance Management System
 
 Production-style **Attendance Management Platform** with:
 
