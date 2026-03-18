@@ -20,3 +20,10 @@ attendanceRoutes.post(
   attendanceController.uploadCsvData
 );
 
+attendanceRoutes.patch(
+  "/record/:id",
+  requireAuth,
+  requireRole("Admin", "SuperAdmin"),
+  attendanceController.updateRecord
+);
+

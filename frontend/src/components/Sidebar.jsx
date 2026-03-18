@@ -61,15 +61,17 @@ export function Sidebar({ role }) {
     { to: "/app/admin/department-employees", label: "Department Employees", icon: "users" },
     { to: "/app/admin/reply-comments", label: "Reply Comments", icon: "tickets" },
     { to: "/app/admin/department-reports", label: "Department Reports", icon: "reports" },
+    { to: "/app/admin/leave-management", label: "Leave Management", icon: "attendance" },
   ];
 
   const superAdmin = [
     { to: "/app/super/all-employees", label: "All Employees", icon: "users" },
     { to: "/app/super/create-employee", label: "Create Employee", icon: "users" },
-    { to: "/app/super/delete-employee", label: "Delete Employee", icon: "users" },
     { to: "/app/super/upload-attendance", label: "Upload Attendance", icon: "attendance" },
     { to: "/app/super/system-logs", label: "System Logs", icon: "logs" },
     { to: "/app/super/all-tickets", label: "All Tickets", icon: "tickets" },
+    { to: "/app/super/holiday-list", label: "Holiday List", icon: "calendar" },
+    { to: "/app/super/all-attendance", label: "All Attendance", icon: "attendance" },
   ];
 
   const sections = [

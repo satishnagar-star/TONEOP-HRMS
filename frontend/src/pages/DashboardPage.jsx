@@ -113,11 +113,13 @@ export function DashboardPage() {
           <Skeleton className="h-24" />
         </div>
       ) : (
-        <div className="grid gap-4 md:grid-cols-4">
-          <Stat label="Total Present" value={stats?.present} accent="bg-success" />
+        <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-6">
+          <Stat label="Present" value={stats?.present} accent="bg-success" />
           <Stat label="Half Days" value={stats?.halfday} accent="bg-yellow-400" />
-          <Stat label="Absent Days" value={stats?.absent} accent="bg-red-500" />
-          <Stat label="Late Minutes" value={stats?.late} accent="bg-brand-600" />
+          <Stat label="Absent" value={stats?.absent} accent="bg-red-500" />
+          <Stat label="Late Mins" value={stats?.late} accent="bg-brand-600" />
+          <Stat label="Balance Leave" value={user?.leave_balance ?? 0} accent="bg-brand-400" />
+          <Stat label="Balance Late" value={90 - (user?.total_late_minutes ?? 0)} accent="bg-brand-800" />
         </div>
       )}
 

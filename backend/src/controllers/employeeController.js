@@ -60,6 +60,30 @@ export const employeeController = {
     return res.json({ success: true });
   }),
 
+  update: asyncHandler(async (req, res) => {
+    const code = req.params.code.toUpperCase();
+    const { name, department, role, password } = req.body;
+
+    const user = await User.findOne({ emp_code: code });
+    if (!user) return res.status(404).json({ success: false, message: "Employee not found" });
+
+    if (name) user.name = name;
+    if (department) user.department = department;
+    if (role) user.role = role;
+    if (password) user.password = password;
+
+    await user.save();
+
+    await store.appendLog({
+      type: "employee.update",
+      at: new Date().toISOString(),
+      code,
+      by: req.user.code,
+    });
+
+    return res.json({ success: true, employee: { code: user.emp_code, name: user.name, department: user.department, role: user.role } });
+  }),
+
   all: asyncHandler(async (req, res) => {
     const employees = await store.getEmployees();
     return res.json({ success: true, employees });

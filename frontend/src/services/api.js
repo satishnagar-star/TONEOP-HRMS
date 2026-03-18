@@ -2,7 +2,8 @@ import axios from "axios";
 import { authStore } from "../context/authStore";
 
 export const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || "http://localhost:5000",
+  baseURL: import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:5000",
+  timeout: 60000, // Increase timeout to 60s for large CSV syncs
 });
 
 api.interceptors.request.use((config) => {

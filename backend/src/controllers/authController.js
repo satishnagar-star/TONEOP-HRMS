@@ -24,7 +24,10 @@ export const authController = {
       return res.status(400).json({ success: false, message: "Invalid input", details: error.details });
     }
 
-    const result = await gasApi.login({ code: value.employeeCode, pass: value.password });
+    const result = await gasApi.login({ code: value.employeeCode, pass: value.password }).catch(err => {
+      console.error("Login service error:", err);
+      return { success: false, message: "Internal server error during login" };
+    });
 
     if (!result?.success || !result?.user) {
       await store.appendLog({
@@ -40,6 +43,8 @@ export const authController = {
       name: result.user.name,
       department: result.user.department,
       role: result.user.role,
+      leave_balance: result.user.leave_balance,
+      total_late_minutes: result.user.total_late_minutes,
     };
     const token = signAccessToken(claims);
 
@@ -51,7 +56,7 @@ export const authController = {
       department: claims.department,
     });
 
-    return res.json({ success: true, token, user: result.user });
+    return res.json({ success: true, token, user: { ...result.user, ...claims } });
   }),
 
   changePassword: asyncHandler(async (req, res) => {

@@ -11,6 +11,8 @@ import { useAuth } from "../context/authStore";
 import { fetchAttendance } from "../services/attendanceApi";
 import { monthLabel, monthNow } from "../utils/date";
 import { normalizeStatus, statusColors } from "../utils/status";
+import { ApplyLeaveSidebar } from "../components/ApplyLeaveSidebar";
+import { Plus } from "lucide-react";
 
 function monthOptions() {
   const now = new Date();
@@ -29,6 +31,7 @@ export function AttendancePage() {
   const [status, setStatus] = useState("All");
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
+  const [isLeaveOpen, setIsLeaveOpen] = useState(false);
   const pageSize = 10;
 
   const query = useQuery({
@@ -54,10 +57,19 @@ export function AttendancePage() {
 
   return (
     <div className="space-y-4">
+      <ApplyLeaveSidebar isOpen={isLeaveOpen} onClose={() => setIsLeaveOpen(false)} />
       <Card className="p-4">
         <div className="mb-3 flex items-center justify-between">
           <div className="text-sm font-semibold text-text">Attendance</div>
-          {query.isFetching && <InlineLoader text="Fetching attendance..." />}
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => setIsLeaveOpen(true)}
+              className="rounded-xl bg-brand-600 px-4 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-brand-700"
+            >
+              Apply Leave
+            </button>
+            {query.isFetching && <InlineLoader text="Fetching attendance..." />}
+          </div>
         </div>
         <div className="grid gap-3 md:grid-cols-3">
           <Select label="Month" value={month} onChange={(e) => (setMonth(e.target.value), setPage(1))}>

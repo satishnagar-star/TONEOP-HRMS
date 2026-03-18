@@ -23,6 +23,8 @@ export const gasApi = {
         name: doc.name,
         department: doc.department,
         role: doc.role,
+        leave_balance: doc.leave_balance,
+        total_late_minutes: doc.total_late_minutes,
       },
     };
   },

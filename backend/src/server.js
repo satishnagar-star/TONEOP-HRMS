@@ -15,6 +15,7 @@ import { attendanceRoutes } from "./routes/attendanceRoutes.js";
 import { commentsRoutes } from "./routes/commentsRoutes.js";
 import { employeeRoutes } from "./routes/employeeRoutes.js";
 import { systemRoutes } from "./routes/systemRoutes.js";
+import holidayRoutes from "./routes/holidayRoutes.js";
 
 const app = express();
 
@@ -50,6 +51,7 @@ app.use("/attendance", attendanceRoutes);
 app.use("/comments", commentsRoutes);
 app.use("/employee", employeeRoutes);
 app.use("/system", systemRoutes);
+app.use("/holiday", holidayRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
