@@ -67,7 +67,7 @@ export const attendanceController = {
     if (!date && !month) {
       const today = format(new Date(), "dd/MM/yyyy");
       const existsToday = await Attendance.findOne({ "records.date": today }).limit(1).lean();
-      
+
       if (existsToday) {
         date = today;
       } else {
@@ -95,8 +95,8 @@ export const attendanceController = {
     const docs = await Attendance.find(query).lean();
     let flattened = [];
     docs.forEach(doc => {
-      const records = date 
-        ? doc.records.filter(r => r.date === date) 
+      const records = date
+        ? doc.records.filter(r => r.date === date)
         : doc.records;
 
       records.forEach(r => {
@@ -162,13 +162,13 @@ export const attendanceController = {
 
   uploadCsvData: asyncHandler(async (req, res) => {
     try {
-      const { documents } = req.body;
+      const { documents, dryRun } = req.body;
 
       if (!documents || !Array.isArray(documents) || documents.length === 0) {
         return res.status(400).json({ success: false, error: "No documents provided for insertion." });
       }
 
-      // 1. Column Validation (Strict)
+      // 1. Header Validation
       const headers = Object.keys(documents[0]);
       const missingHeaders = validateHeaders(headers);
       if (missingHeaders.length > 0) {
@@ -177,187 +177,143 @@ export const attendanceController = {
 
       const total_rows = documents.length;
       let inserted_rows = 0;
+      let rejected_rows = 0;
       const errors = [];
 
-      // 2. Row-Level Validation & Grouping
-      const groupedPunches = {}; // { emp_code: { date: [punches] } }
+      // 2. Row Validation & Grouping
+      const groupedByEmp = {}; // { emp_code: [valid_data_objs] }
+      const datesFound = new Set();
 
       documents.forEach((doc, idx) => {
         const rowNum = idx + 1;
         try {
           const validation = validateRow(doc, rowNum);
-
           if (!validation.isValid) {
-            const enhanced = validation.errors.map(e => ({ ...e, original_row: doc }));
-            errors.push(...enhanced);
+            errors.push({ ...validation.errors[0], original_row: doc });
+            rejected_rows++;
           } else {
-            const { emp_code, month_str } = validation.data;
-            if (!groupedPunches[emp_code]) groupedPunches[emp_code] = {};
-            if (!groupedPunches[emp_code][month_str]) groupedPunches[emp_code][month_str] = [];
-            groupedPunches[emp_code][month_str].push(validation.data);
+            const data = validation.data;
+            if (!groupedByEmp[data.emp_code]) groupedByEmp[data.emp_code] = [];
+            groupedByEmp[data.emp_code].push(data);
+            datesFound.add(data.date_str);
           }
-        } catch (rowErr) {
-          errors.push({ row_number: rowNum, reason: "Parsing Error: " + rowErr.message, original_row: doc });
+        } catch (err) {
+          errors.push({ row_number: rowNum, reason: `Error: ${err.message}`, original_row: doc });
+          rejected_rows++;
         }
       });
 
-      // 3. Punch Consolidation & Attendance Calculation
-      const holidays = await Holiday.find().lean();
-      const users = await User.find().lean();
-      const userMap = users.reduce((acc, u) => { acc[u.emp_code] = u; return acc; }, {});
+      // 3. Preparation for Stats and Formatting
+      const allEmployees = await User.find({ role: "User" }).lean();
+      const empCodes = allEmployees.map(e => e.emp_code.toUpperCase());
+      const sortedDates = [...datesFound].sort((a, b) => {
+        const da = parse(a, "dd/MM/yyyy", new Date());
+        const db = parse(b, "dd/MM/yyyy", new Date());
+        return da - db;
+      });
 
-      const processedRecordsByGroup = {}; // emp_code -> month -> records[]
-      const consolidatedBy = {}; // help track original rows for duplicates
+      const ready_rows = total_rows - rejected_rows;
+      console.log(`Processing Sync: total=${total_rows}, ready=${ready_rows}, dryRun=${dryRun}`);
 
-      for (const emp_code in groupedPunches) {
-        for (const month_str in groupedPunches[emp_code]) {
-          const dailyRows = groupedPunches[emp_code][month_str];
-          // Group by date_str again to process day-by-day
-          const byDay = dailyRows.reduce((acc, row) => {
-            if (!acc[row.date_str]) acc[row.date_str] = [];
-            acc[row.date_str].push(row);
+      // 4. If not dryRun, perform Sync
+      if (!dryRun) {
+        const bulkOps = [];
+        
+        // Combine DB employees and CSV employees to ensure we miss no one
+        const dbEmployees = await User.find({ role: { $in: ["User", "Admin"] } }).lean();
+        const dbEmpCodes = dbEmployees.map(e => e.emp_code.toUpperCase());
+        const csvEmpCodes = Object.keys(groupedByEmp);
+        
+        const allTargetCodes = Array.from(new Set([...dbEmpCodes, ...csvEmpCodes]));
+        
+        console.log(`Grouping data for ${allTargetCodes.length} target employees (DB: ${dbEmpCodes.length}, CSV: ${csvEmpCodes.length})...`);
+        
+        for (const empCode of allTargetCodes) {
+          const empPunches = groupedByEmp[empCode] || [];
+          const punchesByDate = empPunches.reduce((acc, p) => {
+            if (!acc[p.date_str]) acc[p.date_str] = [];
+            acc[p.date_str].push(p);
             return acc;
           }, {});
 
-          if (!processedRecordsByGroup[emp_code]) processedRecordsByGroup[emp_code] = {};
-          if (!processedRecordsByGroup[emp_code][month_str]) processedRecordsByGroup[emp_code][month_str] = [];
+          const employee = dbEmployees.find(e => e.emp_code.toUpperCase() === empCode);
+          const monthlyRecords = {};
 
-          for (const date_str in byDay) {
+          for (const date_str of sortedDates) {
             try {
-              const group = byDay[date_str];
-              const record = processAttendance(group, holidays, userMap[emp_code]);
+              const dateObj = parse(date_str, "dd/MM/yyyy", new Date());
+              const month_str = format(dateObj, "yyyy-MM");
 
-              const finalRecord = {
-                date: record.date, // DD/MM/YYYY
-                time_in: record.time_in,
-                time_out: record.time_out,
-                late_minute: record.late_minute,
-                status: record.status,
-                shift: record.shift
-              };
+              if (!monthlyRecords[month_str]) monthlyRecords[month_str] = [];
 
-              processedRecordsByGroup[emp_code][month_str].push(finalRecord);
-              consolidatedBy[`${emp_code}_${record.date}`] = group[0].original_row;
-            } catch (calcErr) {
-              errors.push({
-                row_number: "N/A",
-                reason: `Calculation Error for ${emp_code} on ${date_str}: ${calcErr.message}`,
-                original_row: byDay[date_str][0].original_row
-              });
+              const dayPunches = punchesByDate[date_str];
+              let finalRecord;
+
+              if (dayPunches && dayPunches.length > 0) {
+                const record = processAttendance(dayPunches);
+                finalRecord = {
+                  date: record.date,
+                  time_in: record.time_in,
+                  time_out: record.time_out,
+                  late_minute: record.late_minute,
+                  status: record.status,
+                  shift: record.shift
+                };
+              } else {
+                // Not in CSV for this specific date
+                finalRecord = {
+                  date: date_str,
+                  time_in: null,
+                  time_out: null,
+                  late_minute: 0,
+                  status: "Absent",
+                  shift: employee?.shift || "[10:00-19:00][09:00]"
+                };
+              }
+              monthlyRecords[month_str].push(finalRecord);
+            } catch (err) {
+              console.error(`Error processing date ${date_str} for ${empCode}:`, err.message);
             }
+          }
+
+          // Important: Get name from punches if employee not in DB
+          const empName = employee?.name || (empPunches[0]?.employee_name) || "Unknown";
+
+          for (const [month_str, records] of Object.entries(monthlyRecords)) {
+            bulkOps.push({
+              updateOne: {
+                filter: { employee_code: empCode, Date: month_str },
+                update: {
+                  $set: { 
+                    employee_name: empName,
+                    records: records
+                  }
+                },
+                upsert: true
+              }
+            });
           }
         }
-      }
 
-      // 4. Comprehensive Sync with Auto-Marking
-      const syncDates = [...new Set(Object.values(consolidatedBy).map(r => r.date_str))];
-      const empCodes = Object.keys(userMap);
-      
-      const bulkOps = [];
-
-      for (const date_str of syncDates) {
-        const dateObj = parse(date_str, "dd/MM/yyyy", new Date());
-        const month_str = format(dateObj, "yyyy-MM");
-
-        for (const emp_code of empCodes) {
-          let user = userMap[emp_code];
-          
-          // Apply HR Policies (Accruals, resets) before processing
-          user = await applyHRPolicies(user);
-          userMap[emp_code] = user; 
-          
-          // Check if record already exists for this specific day to avoid double-processing
-          const existingDoc = existingMap[`${emp_code}_${month_str}`];
-          const isExisting = existingDoc?.records?.some(r => r.date === date_str);
-          
-          if (isExisting) continue;
-
-          let finalRecord;
-          const punchKey = `${emp_code}_${date_str}`;
-          const punches = groupedPunches[emp_code]?.[month_str]?.filter(p => p.date_str === date_str);
-
-          if (punches && punches.length > 0) {
-            // CASE A: User has punches in CSV
-            const record = processAttendance(punches, holidays, user);
-            
-            // Adjust balances based on punch result
-            if (record.plus_one_leave) {
-              await User.updateOne({ emp_code }, { $inc: { leave_balance: 1 } });
-              user.leave_balance += 1;
-            }
-            if (record.late_minute > 0) {
-              await User.updateOne({ emp_code }, { $inc: { total_late_minutes: -record.late_minute } });
-              user.total_late_minutes -= record.late_minute;
-            }
-
-            finalRecord = {
-              date: record.date,
-              time_in: record.time_in,
-              time_out: record.time_out,
-              late_minute: record.late_minute,
-              status: record.status,
-              shift: record.shift,
-              balance_leave: user.leave_balance,
-              balance_late_minutes: user.total_late_minutes
-            };
-            inserted_rows++;
-          } else {
-            // CASE B: User MISSING from CSV for this date -> AUTO-MARK
-            // Virtual processing
-            const virtualGroup = [{
-              emp_code: user.emp_code,
-              employee_name: user.name,
-              date_obj: dateObj,
-              date_str: date_str,
-              month_str: month_str,
-              shift: user.shift || "[09:00-18:00][01:00]",
-              status: "MISSING_PUNCH"
-            }];
-            
-            const record = processAttendance(virtualGroup, holidays, user);
-
-            // SPECIAL BUSINESS LOGIC: Absent -> Leave if balance > 0
-            if (record.status === "Absent") {
-              if (user.leave_balance > 0) {
-                record.status = "Leave";
-                await User.updateOne({ emp_code }, { $inc: { leave_balance: -1 } });
-                user.leave_balance -= 1;
-              }
-            }
-
-            finalRecord = {
-              date: record.date,
-              time_in: null,
-              time_out: null,
-              late_minute: 0,
-              status: record.status,
-              shift: record.shift,
-              balance_leave: user.leave_balance,
-              balance_late_minutes: user.total_late_minutes
-            };
-            // Note: Auto-marked rows are technically "inserted"/reconciled
-            inserted_rows++;
+        console.log(`Total Bulk Operations: ${bulkOps.length}`);
+        if (bulkOps.length > 0) {
+          try {
+            const bulkResult = await Attendance.bulkWrite(bulkOps);
+            console.log(`Bulk sync finished: upserted=${bulkResult.upsertedCount}, modified=${bulkResult.modifiedCount}`);
+          } catch (bulkErr) {
+            console.error("BULK WRITE ERROR:", bulkErr);
+            throw bulkErr;
           }
-
-          // Add to Bulk Ops
-          bulkOps.push({
-            updateOne: {
-              filter: { employee_code: emp_code, Date: month_str },
-              update: {
-                $setOnInsert: { employee_name: user.name },
-                $push: { records: finalRecord }
-              },
-              upsert: true
-            }
-          });
         }
       }
 
       return res.status(200).json({
         success: true,
+        isDryRun: !!dryRun,
         total_rows,
-        inserted_rows,
-        rejected_rows: total_rows - inserted_rows,
+        ready_rows,
+        inserted_rows: dryRun ? 0 : ready_rows,
+        rejected_rows,
         errors
       });
     } catch (fatalErr) {
@@ -365,8 +321,7 @@ export const attendanceController = {
       return res.status(500).json({
         success: false,
         error: "Internal Server Error",
-        message: fatalErr.message,
-        stack: fatalErr.stack
+        message: fatalErr.message
       });
     }
   }),

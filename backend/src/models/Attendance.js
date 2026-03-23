@@ -21,6 +21,7 @@ const attendanceSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
+    collection: 'Attendance'
   }
 );
 

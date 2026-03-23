@@ -10,13 +10,53 @@ export function SuperUploadAttendancePage() {
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState([]);
-  const [stats, setStats] = useState(null); // { total, inserted, rejected }
+  const [stats, setStats] = useState(null); // { total, ready, inserted, rejected }
   const [rawRows, setRawRows] = useState(null);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [isValidated, setIsValidated] = useState(false);
 
   const resetState = () => {
     setErrors([]);
     setStats(null);
     setRawRows(null);
+    setShowConfirm(false);
+    setIsValidated(false);
+  };
+
+  const validateData = async (rows) => {
+    setLoading(true);
+    setErrors([]);
+    setStats(null);
+    try {
+      const response = await api.post('/attendance/upload', { documents: rows, dryRun: true });
+      const data = response.data;
+      if (data.success) {
+        setStats({
+          total: data.total_rows,
+          ready: data.ready_rows,
+          inserted: 0,
+          rejected: data.rejected_rows
+        });
+        setErrors(data.errors || []);
+        setIsValidated(true);
+        if (data.rejected_rows > 0) {
+          toast.error(`${data.rejected_rows} rows have validation issues.`);
+        } else {
+          toast.success("All rows are ready for load!");
+        }
+      }
+    } catch (err) {
+      console.error(err);
+      const errorMsg = err.response?.data?.error || err.message || 'Validation failed';
+      toast.error(errorMsg);
+      if (err.response?.data?.missing) {
+         setErrors([{ row_number: 'Header', reason: `Missing required columns: ${err.response.data.missing.join(', ')}` }]);
+      } else {
+         setErrors([{ row_number: 'Validation', reason: errorMsg }]);
+      }
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleFileUpload = (e) => {
@@ -40,6 +80,7 @@ export function SuperUploadAttendancePage() {
           return;
         }
         setRawRows(results.data);
+        validateData(results.data); // Auto-validate
       },
       error: (err) => setErrors([{ row_number: 'N/A', reason: `Failed to parse CSV: ${err.message}` }])
     });
@@ -48,48 +89,25 @@ export function SuperUploadAttendancePage() {
   const syncToMongo = async () => {
     if (!rawRows || rawRows.length === 0) return;
     
-    // Confirmation Popup as requested by user
-    if (!window.confirm(`Are you sure you want to sync ${rawRows.length} rows to the backend? This will process calculations and deduplication.`)) {
-      return;
-    }
-
     setLoading(true);
-    setErrors([]);
-    setStats(null);
+    setShowConfirm(false);
 
     try {
-      // Send raw data to backend for validation and processing
-      const response = await api.post('/attendance/upload', { documents: rawRows });
+      const response = await api.post('/attendance/upload', { documents: rawRows, dryRun: false });
       const data = response.data;
 
       if (data.success) {
         setStats({
           total: data.total_rows,
+          ready: data.ready_rows,
           inserted: data.inserted_rows,
           rejected: data.rejected_rows
         });
-
-        if (data.errors && data.errors.length > 0) {
-          setErrors(data.errors);
-          if (data.inserted_rows > 0) {
-            toast.success(`Partial Success: ${data.inserted_rows} rows inserted, ${data.rejected_rows} rejected.`);
-          } else {
-            toast.error(`Rejection: All ${data.total_rows} rows were rejected.`);
-          }
-        } else {
-          toast.success(`Successfully uploaded all ${data.inserted_rows} records!`);
-        }
+        toast.success(`Successfully uploaded ${data.inserted_rows} records!`);
       }
     } catch (err) {
       console.error(err);
-      const errorMsg = err.response?.data?.error || err.message || 'Failed to sync to MongoDB';
-      toast.error(errorMsg);
-      
-      if (err.response?.data?.missing) {
-         setErrors([{ row_number: 'Header', reason: `Missing required columns: ${err.response.data.missing.join(', ')}` }]);
-      } else {
-         setErrors([{ row_number: 'Sync', reason: errorMsg }]);
-      }
+      toast.error(err.response?.data?.error || err.message || 'Sync failed');
     } finally {
       setLoading(false);
     }
@@ -155,42 +173,67 @@ export function SuperUploadAttendancePage() {
             </div>
           </div>
 
-          {rawRows && !stats && (
+          {isValidated && stats?.inserted === 0 && !showConfirm && (
             <button 
-              onClick={syncToMongo}
+              onClick={() => setShowConfirm(true)}
               disabled={loading}
               className="flex w-full items-center justify-center space-x-2 rounded-xl bg-brand-600 px-8 py-3.5 font-bold text-white shadow-md transition-all hover:bg-brand-700 hover:shadow-lg disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {loading ? (
-                <>
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                  <span>Processing...</span>
-                </>
-              ) : (
-                <>
-                  <CheckCircle2 className="h-5 w-5" />
-                  <span>Sync to Backend</span>
-                </>
-              )}
+              <CheckCircle2 className="h-5 w-5" />
+              <span>Sync to Backend</span>
             </button>
+          )}
+
+          {showConfirm && (
+            <div className="rounded-2xl bg-brand-50 p-6 border-2 border-brand-200 animate-in fade-in zoom-in duration-200">
+               <div className="text-center space-y-4">
+                 <p className="text-sm font-bold text-brand-900">Are you sure to upload the data?</p>
+                 <div className="flex gap-3">
+                   <button
+                     onClick={syncToMongo}
+                     className="flex-1 rounded-xl bg-brand-600 py-2.5 text-sm font-bold text-white hover:bg-brand-700 transition-colors"
+                   >
+                     Sure
+                   </button>
+                   <button
+                     onClick={() => setShowConfirm(false)}
+                     className="flex-1 rounded-xl bg-white border border-brand-200 py-2.5 text-sm font-bold text-brand-600 hover:bg-brand-50 transition-colors"
+                   >
+                     No
+                   </button>
+                 </div>
+               </div>
+            </div>
           )}
 
           {stats && (
             <div className="space-y-3">
-              <div className="flex items-center justify-between rounded-xl border border-success/20 bg-success/5 p-4">
-                <div className="flex items-center space-x-3">
-                  <CheckCircle2 className="h-5 w-5 text-success" />
-                  <span className="text-sm font-medium text-success">Inserted</span>
+              {stats.inserted === 0 ? (
+                <>
+                  <div className="flex items-center justify-between rounded-xl border border-brand-200 bg-brand-50 p-4">
+                    <div className="flex items-center space-x-3">
+                      <FileJson className="h-5 w-5 text-brand-600" />
+                      <span className="text-sm font-medium text-brand-900">Ready to Load</span>
+                    </div>
+                    <span className="text-lg font-bold text-brand-700">{stats.ready}</span>
+                  </div>
+                  <div className="flex items-center justify-between rounded-xl border border-red-200 bg-red-50 p-4">
+                    <div className="flex items-center space-x-3">
+                      <XCircle className="h-5 w-5 text-red-500" />
+                      <span className="text-sm font-medium text-red-800">Rejection</span>
+                    </div>
+                    <span className="text-lg font-bold text-red-700">{stats.rejected}</span>
+                  </div>
+                </>
+              ) : (
+                <div className="flex items-center justify-between rounded-xl border border-success/20 bg-success/5 p-4">
+                  <div className="flex items-center space-x-3">
+                    <CheckCircle2 className="h-5 w-5 text-success" />
+                    <span className="text-sm font-medium text-success">Successfully Loaded</span>
+                  </div>
+                  <span className="text-lg font-bold text-success">{stats.inserted}</span>
                 </div>
-                <span className="text-lg font-bold text-success">{stats.inserted}</span>
-              </div>
-              <div className="flex items-center justify-between rounded-xl border border-red-200 bg-red-50 p-4">
-                <div className="flex items-center space-x-3">
-                  <XCircle className="h-5 w-5 text-red-500" />
-                  <span className="text-sm font-medium text-red-800">Rejected</span>
-                </div>
-                <span className="text-lg font-bold text-red-700">{stats.rejected}</span>
-              </div>
+              )}
             </div>
           )}
         </div>
