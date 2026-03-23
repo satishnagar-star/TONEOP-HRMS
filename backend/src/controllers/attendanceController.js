@@ -1,12 +1,12 @@
 import Joi from "joi";
+import mongoose from "mongoose";
 import { asyncHandler } from "../utils/asyncHandler.js";
-import { store } from "../services/dataStore.js";
 import { Attendance } from "../models/Attendance.js";
 import { Holiday } from "../models/Holiday.js";
 import { User } from "../models/User.js";
 import { format, parse } from "date-fns";
 import { validateHeaders, validateRow, processAttendance } from "../utils/attendanceUtils.js";
-import { applyHRPolicies } from "../utils/leavePolicyUtils.js";
+import { ensureUserBalances } from "../utils/hrCoreLogic.js";
 
 const monthSchema = Joi.string()
   .pattern(/^\d{4}-\d{2}$/)
@@ -26,110 +26,83 @@ export const attendanceController = {
     if (error) return res.status(400).json({ success: false, message: "Invalid month. Use YYYY-MM." });
 
     const requester = req.user;
-    if (requester.role === "User" && requester.code !== employeeCode) {
+    // Check permissions
+    if (requester.role === "User" && requester.emp_code?.toUpperCase() !== employeeCode) {
       return res.status(403).json({ success: false, message: "Forbidden" });
     }
 
-    const employee = (await store.getEmployees()).find((e) => e.code === employeeCode);
-
-    if (requester.role === "Admin") {
-      if (employee && employee.department !== requester.department) {
-        return res.status(403).json({ success: false, message: "Forbidden" });
-      }
+    const employee = await User.findOne({ emp_code: employeeCode });
+    if (requester.role === "Admin" && employee?.department !== requester.department) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
     }
 
     const doc = await Attendance.findOne({ employee_code: employeeCode, Date: month }).lean();
 
-    // Map to the format expected by AttendancePage.jsx (in, out, late)
-    const attendance = doc?.records?.map(r => ({
-      ...r,
-      in: r.time_in,
-      out: r.time_out,
-      late: r.late_minute,
-      employee_name: doc.employee_name,
-      emp_code: doc.employee_code,
-      month: doc.Date
-    })) || [];
+    const attendance = doc?.records?.map(r => ({ ...r, late: r.late_minute })) || [];
+    const allHolidays = await Holiday.find().lean();
+    
+    // Calculate Stats for the ENTIRE Month dynamically
+    const [year, monthNum] = month.split("-").map(Number);
+    const daysInMonth = new Date(year, monthNum, 0).getDate();
+    const stats = { present: 0, absent: 0, halfday: 0, leave: 0, wfh: 0, holiday: 0, weekoff: 0, late_minutes: 0, shortleave: 0 };
+    
+    const recordsMap = attendance.reduce((acc, r) => {
+      acc[r.date] = r;
+      return acc;
+    }, {});
 
-    return res.json({
-      success: true,
-      employee: employee ?? { code: employeeCode, month },
-      attendance,
-    });
-  }),
+    const now = new Date();
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dateStr = `${String(d).padStart(2, "0")}/${String(monthNum).padStart(2, "0")}/${year}`;
+      const record = recordsMap[dateStr];
+      
+      const dateObj = parse(dateStr, "dd/MM/yyyy", new Date());
+      const dayName = format(dateObj, "EEEE");
+      const isSunday = dayName === "Sunday";
+      const isSaturday = dayName === "Saturday";
+      const dept = (employee?.department || "").toUpperCase();
+      const isWeekOff = isSunday || (dept === "IT" && isSaturday);
+      
+      const isHoliday = allHolidays.some(h => {
+        const hDate = typeof h.date === "string" ? h.date : format(new Date(h.date), "dd/MM/yyyy");
+        return hDate === dateStr;
+      });
 
-  getAll: asyncHandler(async (req, res) => {
-    let { date, month, department } = req.query;
-
-    if (req.user.role !== "SuperAdmin") return res.status(403).json({ success: false, message: "Forbidden" });
-
-    // Handle Default Date Logic if neither date nor month is provided
-    if (!date && !month) {
-      const today = format(new Date(), "dd/MM/yyyy");
-      const existsToday = await Attendance.findOne({ "records.date": today }).limit(1).lean();
-
-      if (existsToday) {
-        date = today;
-      } else {
-        const latestMonthDoc = await Attendance.findOne().sort({ Date: -1 }).lean();
-        if (latestMonthDoc && latestMonthDoc.records.length > 0) {
-          const sorted = [...latestMonthDoc.records].sort((a, b) => {
-            const da = parse(a.date, "dd/MM/yyyy", new Date());
-            const db = parse(b.date, "dd/MM/yyyy", new Date());
-            return db - da;
-          });
-          date = sorted[0].date;
-        } else {
-          date = today;
+      if (record) {
+        let s = record.status;
+        
+        // If it's recorded as Absent but it's a WeekOff/Holiday, count it correctly for stats
+        if (s === "Absent") {
+          if (isHoliday) s = "Holiday";
+          else if (isWeekOff) s = "WeekOff";
         }
+
+        if (s === "Present") stats.present++;
+        else if (s === "Absent") stats.absent++;
+        else if (s === "Halfday" || s === "Half Day") stats.halfday++;
+        else if (s === "Leave") stats.leave++;
+        else if (s === "WFH") stats.wfh++;
+        else if (s === "Holiday") stats.holiday++;
+        else if (s === "WeekOff" || s === "Week Off") stats.weekoff++;
+        else if (s === "Short Leave") stats.shortleave++;
+        stats.late_minutes += (record.late_minute || 0);
+      } else {
+        if (isHoliday) stats.holiday++;
+        else if (isWeekOff) stats.weekoff++;
+        else if (dateObj <= now) stats.absent++;
       }
     }
 
-    const query = {};
-    if (date) {
-      query["records.date"] = date;
-    } else if (month) {
-      query["Date"] = month;
-    }
-
-    const docs = await Attendance.find(query).lean();
-    let flattened = [];
-    docs.forEach(doc => {
-      const records = date
-        ? doc.records.filter(r => r.date === date)
-        : doc.records;
-
-      records.forEach(r => {
-        flattened.push({
-          _id: r._id,
-          employee_code: doc.employee_code,
-          employee_name: doc.employee_name,
-          date: r.date,
-          time_in: r.time_in,
-          time_out: r.time_out,
-          late_minute: r.late_minute,
-          status: r.status,
-          shift: r.shift,
-          balance_leave: r.balance_leave || 0,
-          balance_late_minutes: r.balance_late_minutes || 0
-        });
-      });
+    return res.json({
+      success: true,
+      employee: employee || { emp_code: employeeCode, name: doc?.employee_name || "Unknown" },
+      attendance,
+      stats: {
+        ...stats,
+        total_late_minutes: 90 - stats.late_minutes,
+        leave_balance: employee?.leave_balance ?? 0
+      }
     });
-
-    if (department) {
-      const employees = await store.getEmployees();
-      const codesInDept = employees.filter(e => e.department === department).map(e => e.code);
-      flattened = flattened.filter(f => codesInDept.includes(f.employee_code));
-    }
-
-    // Sort by date and time descending
-    flattened.sort((a, b) => {
-      const da = parse(`${a.date} ${a.time_in || "00:00"}`, "dd/MM/yyyy HH:mm", new Date());
-      const db = parse(`${b.date} ${b.time_in || "00:00"}`, "dd/MM/yyyy HH:mm", new Date());
-      return db - da;
-    });
-
-    return res.json({ success: true, count: flattened.length, date: date || month, results: flattened });
   }),
 
   getDepartment: asyncHandler(async (req, res) => {
@@ -144,17 +117,20 @@ export const attendanceController = {
       return res.status(403).json({ success: false, message: "Forbidden" });
     }
 
-    const docs = await Attendance.find({ Date: month }).lean();
+    const deptUsers = await User.find({ department: dept, role: { $in: ["User", "Admin"] } }).select('emp_code name').lean();
+    const deptCodes = deptUsers.map(u => u.emp_code.toUpperCase());
+
+    const docs = await Attendance.find({ employee_code: { $in: deptCodes }, Date: month }).lean();
     const employeeMap = docs.reduce((acc, doc) => {
       acc[doc.employee_code] = doc.records.map(r => ({ ...r, employee_name: doc.employee_name, emp_code: doc.employee_code, month: doc.Date }));
       return acc;
     }, {});
 
-    const employees = (await store.getEmployees()).filter((e) => e.department === dept);
-    const results = employees.map(e => ({
-      code: e.code,
+    const results = deptUsers.map(e => ({
+      code: e.emp_code,
+      name: e.name,
       month,
-      data: { success: true, records: employeeMap[e.code] || [] }
+      data: { success: true, records: employeeMap[e.emp_code.toUpperCase()] || [] }
     }));
 
     return res.json({ success: true, department: dept, month, count: results.length, results });
@@ -168,7 +144,6 @@ export const attendanceController = {
         return res.status(400).json({ success: false, error: "No documents provided for insertion." });
       }
 
-      // 1. Header Validation
       const headers = Object.keys(documents[0]);
       const missingHeaders = validateHeaders(headers);
       if (missingHeaders.length > 0) {
@@ -176,12 +151,9 @@ export const attendanceController = {
       }
 
       const total_rows = documents.length;
-      let inserted_rows = 0;
       let rejected_rows = 0;
       const errors = [];
-
-      // 2. Row Validation & Grouping
-      const groupedByEmp = {}; // { emp_code: [valid_data_objs] }
+      const groupedByEmp = {}; 
       const datesFound = new Set();
 
       documents.forEach((doc, idx) => {
@@ -203,9 +175,6 @@ export const attendanceController = {
         }
       });
 
-      // 3. Preparation for Stats and Formatting
-      const allEmployees = await User.find({ role: "User" }).lean();
-      const empCodes = allEmployees.map(e => e.emp_code.toUpperCase());
       const sortedDates = [...datesFound].sort((a, b) => {
         const da = parse(a, "dd/MM/yyyy", new Date());
         const db = parse(b, "dd/MM/yyyy", new Date());
@@ -213,20 +182,13 @@ export const attendanceController = {
       });
 
       const ready_rows = total_rows - rejected_rows;
-      console.log(`Processing Sync: total=${total_rows}, ready=${ready_rows}, dryRun=${dryRun}`);
 
-      // 4. If not dryRun, perform Sync
       if (!dryRun) {
-        const bulkOps = [];
-        
-        // Combine DB employees and CSV employees to ensure we miss no one
-        const dbEmployees = await User.find({ role: { $in: ["User", "Admin"] } }).lean();
-        const dbEmpCodes = dbEmployees.map(e => e.emp_code.toUpperCase());
+        const targetGroups = {}; 
+        const allHolidays = await Holiday.find().lean();
+        const dbEmployees = await User.find({}); 
         const csvEmpCodes = Object.keys(groupedByEmp);
-        
-        const allTargetCodes = Array.from(new Set([...dbEmpCodes, ...csvEmpCodes]));
-        
-        console.log(`Grouping data for ${allTargetCodes.length} target employees (DB: ${dbEmpCodes.length}, CSV: ${csvEmpCodes.length})...`);
+        const allTargetCodes = Array.from(new Set([...dbEmployees.map(e => e.emp_code.toUpperCase()), ...csvEmpCodes]));
         
         for (const empCode of allTargetCodes) {
           const empPunches = groupedByEmp[empCode] || [];
@@ -236,75 +198,72 @@ export const attendanceController = {
             return acc;
           }, {});
 
-          const employee = dbEmployees.find(e => e.emp_code.toUpperCase() === empCode);
-          const monthlyRecords = {};
+          let employee = dbEmployees.find(e => e.emp_code.toUpperCase() === empCode);
+          if (!employee && empPunches.length > 0) {
+            employee = { emp_code: empCode, name: empPunches[0].employee_name, role: "User", department: "Unknown" };
+          }
+          if (!employee) continue;
 
           for (const date_str of sortedDates) {
-            try {
-              const dateObj = parse(date_str, "dd/MM/yyyy", new Date());
-              const month_str = format(dateObj, "yyyy-MM");
+            const dateObj = parse(date_str, "dd/MM/yyyy", new Date());
+            const month_str = format(dateObj, "yyyy-MM");
+            const key = `${empCode}_${month_str}`;
 
-              if (!monthlyRecords[month_str]) monthlyRecords[month_str] = [];
-
-              const dayPunches = punchesByDate[date_str];
-              let finalRecord;
-
-              if (dayPunches && dayPunches.length > 0) {
-                const record = processAttendance(dayPunches);
-                finalRecord = {
-                  date: record.date,
-                  time_in: record.time_in,
-                  time_out: record.time_out,
-                  late_minute: record.late_minute,
-                  status: record.status,
-                  shift: record.shift
-                };
-              } else {
-                // Not in CSV for this specific date
-                finalRecord = {
-                  date: date_str,
-                  time_in: null,
-                  time_out: null,
-                  late_minute: 0,
-                  status: "Absent",
-                  shift: employee?.shift || "[10:00-19:00][09:00]"
-                };
-              }
-              monthlyRecords[month_str].push(finalRecord);
-            } catch (err) {
-              console.error(`Error processing date ${date_str} for ${empCode}:`, err.message);
+            if (!targetGroups[key]) {
+              if (employee._id) employee = await ensureUserBalances(employee, date_str);
+              targetGroups[key] = { empCode, monthStr: month_str, empName: employee.name, employee, newRecords: [] };
             }
+
+            const dayPunches = punchesByDate[date_str] || [];
+            const record = processAttendance(dayPunches, { employee, holidays: allHolidays, date_str });
+
+            if (record.status === "Absent" && employee._id && employee.leave_balance > 0) {
+               record.status = "Leave";
+               employee.leave_balance -= 1;
+               await User.updateOne({ _id: employee._id }, { $inc: { leave_balance: -1 } });
+            }
+
+            if (record.late_deducted > 0 && employee._id) {
+               employee.total_late_minutes -= record.late_deducted;
+               await User.updateOne({ _id: employee._id }, { $inc: { total_late_minutes: -record.late_deducted } });
+            }
+
+            if (record.leave_earned > 0 && employee._id) {
+               employee.leave_balance += record.leave_earned;
+               await User.updateOne({ _id: employee._id }, { $inc: { leave_balance: record.leave_earned } });
+            }
+
+            record.balance_leave = employee.leave_balance || 0;
+            record.balance_late_minutes = employee.total_late_minutes || 0;
+            targetGroups[key].newRecords.push(record);
           }
+        }
 
-          // Important: Get name from punches if employee not in DB
-          const empName = employee?.name || (empPunches[0]?.employee_name) || "Unknown";
-
-          for (const [month_str, records] of Object.entries(monthlyRecords)) {
-            bulkOps.push({
-              updateOne: {
-                filter: { employee_code: empCode, Date: month_str },
-                update: {
-                  $set: { 
-                    employee_name: empName,
-                    records: records
-                  }
-                },
-                upsert: true
-              }
+        const bulkOps = [];
+        for (const key of Object.keys(targetGroups)) {
+          const { empCode, monthStr, empName, newRecords } = targetGroups[key];
+          let doc = await Attendance.findOne({ employee_code: empCode, Date: monthStr });
+          if (!doc) {
+            doc = new Attendance({ employee_code: empCode, employee_name: empName, Date: monthStr, records: newRecords });
+          } else {
+            const existingRecords = doc.records || [];
+            newRecords.forEach(newR => {
+              const idx = existingRecords.findIndex(r => r.date === newR.date);
+              if (idx > -1) existingRecords[idx] = { ...existingRecords[idx].toObject(), ...newR };
+              else existingRecords.push(newR);
             });
+            doc.records = existingRecords;
+            doc.employee_name = empName;
           }
+          bulkOps.push({
+            updateOne: {
+              filter: { _id: doc._id || new mongoose.Types.ObjectId() },
+              update: { $set: { employee_code: doc.employee_code, employee_name: doc.employee_name, Date: doc.Date, records: doc.records } },
+              upsert: true
+            }
+          });
         }
-
-        console.log(`Total Bulk Operations: ${bulkOps.length}`);
-        if (bulkOps.length > 0) {
-          try {
-            const bulkResult = await Attendance.bulkWrite(bulkOps);
-            console.log(`Bulk sync finished: upserted=${bulkResult.upsertedCount}, modified=${bulkResult.modifiedCount}`);
-          } catch (bulkErr) {
-            console.error("BULK WRITE ERROR:", bulkErr);
-            throw bulkErr;
-          }
-        }
+        if (bulkOps.length > 0) await Attendance.bulkWrite(bulkOps);
       }
 
       return res.status(200).json({
@@ -318,27 +277,53 @@ export const attendanceController = {
       });
     } catch (fatalErr) {
       console.error("FATAL UPLOAD ERROR:", fatalErr);
-      return res.status(500).json({
-        success: false,
-        error: "Internal Server Error",
-        message: fatalErr.message
-      });
+      return res.status(500).json({ success: false, error: "Internal Server Error", message: fatalErr.message });
     }
   }),
 
   updateRecord: asyncHandler(async (req, res) => {
-    const { id } = req.params; // Internal record ID (_id)
+    const { id } = req.params;
     const updateData = req.body;
-
-    // Find the monthly doc containing this record and update it using positional operator $
-    const doc = await Attendance.findOneAndUpdate(
-      { "records._id": id },
-      { $set: { "records.$": { ...updateData, _id: id } } },
-      { new: true }
-    );
-
+    const doc = await Attendance.findOne({ "records._id": id });
     if (!doc) return res.status(404).json({ success: false, message: "Record not found" });
 
-    res.json({ success: true, record: doc.records.id(id) });
+    const record = doc.records.id(id);
+    Object.assign(record, updateData);
+    await doc.save();
+
+    if (updateData.balance_leave !== undefined || updateData.balance_late_minutes !== undefined) {
+      const userUpdate = {};
+      if (updateData.balance_leave !== undefined) userUpdate.leave_balance = updateData.balance_leave;
+      if (updateData.balance_late_minutes !== undefined) userUpdate.total_late_minutes = updateData.balance_late_minutes;
+      await User.updateOne({ emp_code: doc.employee_code.toUpperCase() }, { $set: userUpdate });
+    }
+    res.json({ success: true, record });
+  }),
+
+  getAll: asyncHandler(async (req, res) => {
+    const { month, department, employee } = req.query;
+    const filter = {};
+    if (month) filter.Date = month;
+    if (employee) filter.employee_code = employee.toUpperCase();
+
+    let docs = await Attendance.find(filter).lean();
+    let allRecords = [];
+    docs.forEach(doc => {
+      allRecords.push(...doc.records.map(r => ({ ...r, employee_code: doc.employee_code, employee_name: doc.employee_name, month: doc.Date })));
+    });
+
+    if (department) {
+       const usersInDept = await User.find({ department }).select('emp_code');
+       const deptEmpCodes = usersInDept.map(u => u.emp_code.toUpperCase());
+       allRecords = allRecords.filter(r => deptEmpCodes.includes(r.employee_code.toUpperCase()));
+    }
+
+    allRecords.sort((a, b) => {
+      const da = parse(a.date, "dd/MM/yyyy", new Date());
+      const db = parse(b.date, "dd/MM/yyyy", new Date());
+      return db - da;
+    });
+
+    res.json({ success: true, results: allRecords });
   }),
 };

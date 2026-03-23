@@ -1,4 +1,4 @@
-import { parse, format, differenceInMinutes, isBefore, isAfter, isValid, getDay } from "date-fns";
+import { parse, format, differenceInMinutes, isBefore, isAfter, isValid, getDay, compareAsc, compareDesc } from "date-fns";
 
 /**
  * Strict RegEx for Shift Format: ^\[\d{2}:\d{2}-\d{2}:\d{2}\]\[\d{2}:\d{2}\]$
@@ -131,54 +131,120 @@ export function validateRow(row, rowNum) {
 /**
  * Consolidate Punches and Calculate Status
  */
-export function processAttendance(group) {
-  const punchesIn = group.filter(p => p.status === "IN").sort((a, b) => a.date_obj - b.date_obj);
-  const punchesOut = group.filter(p => p.status === "OUT").sort((a, b) => a.date_obj - b.date_obj);
+/**
+ * Core Attendance Calculation Logic (Enhanced for WeekOffs & Holidays)
+ * Rules:
+ * - IT Dept: Sat/Sun off. Others: Sun off.
+ * - Holiday: Check against holiday list.
+ * - Overtime: Worked on WeekOff = +1 Leave Balance.
+ * - Status: Present (>6h), Halfday (<=6h or single punch), Absent (no punch).
+ */
+export function processAttendance(punches, options = {}) {
+  const { 
+    employee = {}, 
+    holidays = [], 
+    date_str = "" 
+  } = options;
 
-  const time_in = punchesIn.length > 0 ? punchesIn[0].time_str : null;
-  const time_out = punchesOut.length > 0 ? punchesOut[punchesOut.length - 1].time_str : null;
+  let dateObj;
+  if (date_str) {
+    dateObj = parse(date_str, "dd/MM/yyyy", new Date());
+  } else if (punches && punches.length > 0) {
+    dateObj = punches[0].date_obj || parse(punches[0].date_str, "dd/MM/yyyy", new Date());
+  } else {
+    dateObj = new Date();
+  }
 
-  const { shift, emp_code, employee_name, date_str, month_str } = group[0];
+  const current_date_str = date_str || (punches && punches[0] ? punches[0].date_str : format(dateObj, "dd/MM/yyyy"));
+  const dayName = format(dateObj, "EEEE"); 
+  const isSunday = dayName === "Sunday";
+  const isSaturday = dayName === "Saturday";
   
-  // Late Minutes Calculation: IN vs Shift Start
-  const shiftStartStr = shift.substring(1, 6); // [10:00-19:00] -> 10:00
-  let late_minute = 0;
-  if (time_in) {
-    const [sH, sM] = shiftStartStr.split(":").map(Number);
-    const [iH, iM] = time_in.split(":").map(Number);
-    const shiftStart = new Date(group[0].date_obj);
-    shiftStart.setHours(sH, sM, 0, 0);
-    const actualIn = new Date(group[0].date_obj);
-    actualIn.setHours(iH, iM, 0, 0);
+  // Rule: IT Dept has Sat/Sun off, others only Sun
+  const dept = (employee.department || "").toString().trim().toUpperCase();
+  const isWeekOff = isSunday || (dept === "IT" && isSaturday);
+  
+  // Rule: Check Holiday
+  const isHoliday = holidays.some(h => {
+    const hDate = typeof h.date === "string" ? h.date : format(new Date(h.date), "dd/MM/yyyy");
+    return hDate === current_date_str;
+  });
 
-    if (isAfter(actualIn, shiftStart)) {
-      late_minute = differenceInMinutes(actualIn, shiftStart);
+  const shift = employee.shift || (punches && punches[0] ? punches[0].shift : "[10:00-19:00][09:00]");
+
+  // Default record state
+  const result = {
+    date: current_date_str,
+    time_in: null,
+    time_out: null,
+    late_minute: 0,
+    status: "Absent",
+    shift,
+    leave_earned: 0,
+    late_deducted: 0,
+    emp_code: employee.emp_code || (punches && punches[0] ? punches[0].emp_code : ""),
+    employee_name: employee.name || (punches && punches[0] ? punches[0].employee_name : "Unknown")
+  };
+
+  if (!punches || punches.length === 0) {
+    if (isWeekOff) result.status = "WeekOff";
+    else if (isHoliday) result.status = "Holiday";
+    else result.status = "Absent"; 
+    return result;
+  }
+
+  // Handle Punches
+  const inPunches = punches
+    .filter(p => p.status === "IN")
+    .sort((a, b) => compareAsc(parse(a.time_str, "HH:mm", new Date()), parse(b.time_str, "HH:mm", new Date())));
+  
+  const outPunches = punches
+    .filter(p => p.status === "OUT")
+    .sort((a, b) => compareAsc(parse(a.time_str, "HH:mm", new Date()), parse(b.time_str, "HH:mm", new Date())));
+
+  const firstIn = inPunches[0];
+  const lastOut = outPunches[outPunches.length - 1];
+
+  result.time_in = firstIn ? firstIn.time_str : null;
+  result.time_out = lastOut ? lastOut.time_str : null;
+
+  // Rule: Calculate Late Minutes
+  if (result.time_in) {
+    const shiftMatch = shift.match(/\[(\d{2}:\d{2})-\d{2}:\d{2}\]/);
+    if (shiftMatch) {
+      const shiftStartStr = shiftMatch[1];
+      const [sH, sM] = shiftStartStr.split(":").map(Number);
+      const [iH, iM] = result.time_in.split(":").map(Number);
+      
+      const shiftStartTime = new Date(dateObj); shiftStartTime.setHours(sH, sM, 0, 0);
+      const punchTime = new Date(dateObj); punchTime.setHours(iH, iM, 0, 0);
+      
+      if (isAfter(punchTime, shiftStartTime)) {
+        result.late_minute = differenceInMinutes(punchTime, shiftStartTime);
+        result.late_deducted = result.late_minute;
+      }
     }
   }
 
-  // Attendance Status Logic
-  let status = "Absent";
-  if (time_in && time_out) {
-    const [iH, iM] = time_in.split(":").map(Number);
-    const [oH, oM] = time_out.split(":").map(Number);
-    const tIn = new Date(group[0].date_obj); tIn.setHours(iH, iM, 0, 0);
-    const tOut = new Date(group[0].date_obj); tOut.setHours(oH, oM, 0, 0);
-    const duration = differenceInMinutes(tOut, tIn) / 60; // hours
+  // Rule: Final Status Rule (Present vs Halfday)
+  if (result.time_in && result.time_out) {
+    const [iH, iM] = result.time_in.split(":").map(Number);
+    const [oH, oM] = result.time_out.split(":").map(Number);
+    const tIn = new Date(dateObj); tIn.setHours(iH, iM, 0, 0);
+    const tOut = new Date(dateObj); tOut.setHours(oH, oM, 0, 0);
+    const durationHours = differenceInMinutes(tOut, tIn) / 60;
 
-    status = duration > 6 ? "Present" : "Halfday";
-  } else if (time_in || time_out) {
-    status = "Halfday";
+    if (durationHours > 6) result.status = "Present";
+    else result.status = "Halfday";
+  } else if (result.time_in || result.time_out) {
+    result.status = "Halfday";
   }
 
-  return {
-    emp_code,
-    employee_name,
-    date: date_str, // DD-MM-YYYY
-    month: month_str, // YYYY-MM
-    time_in,
-    time_out,
-    late_minute,
-    status,
-    shift
-  };
+  // Rule: Sunday/Weekoff Overtime (+1 Leave Balance)
+  if (isWeekOff && (result.time_in || result.time_out)) {
+    result.leave_earned = 1;
+    // Keep status as Present/Halfday to show work
+  }
+
+  return result;
 }

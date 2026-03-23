@@ -24,6 +24,7 @@ import { SuperUploadAttendancePage } from "./pages/SuperUploadAttendancePage";
 import { HolidayPage } from "./pages/HolidayPage";
 import { SuperAllAttendancePage } from "./pages/SuperAllAttendancePage";
 import { LeaveManagementPage } from "./pages/LeaveManagementPage";
+import { LeaveApplyPage } from "./pages/LeaveApplyPage";
 
 export default function App() {
   return (
@@ -38,6 +39,7 @@ export default function App() {
               <Route path="dashboard" element={<DashboardPage />} />
               <Route path="attendance" element={<AttendancePage />} />
               <Route path="calendar" element={<CalendarPage />} />
+              <Route path="leave-apply" element={<LeaveApplyPage />} />
               <Route path="reports" element={<PlaceholderPage title="Reports" subtitle="Coming next: exportable department & org reports." />} />
               <Route path="raise-comment" element={<RaiseCommentPage />} />
               <Route path="settings" element={<SettingsPage />} />

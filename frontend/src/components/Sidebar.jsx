@@ -52,6 +52,7 @@ export function Sidebar({ role }) {
     { to: "/app/dashboard", label: "Dashboard", icon: "dashboard" },
     { to: "/app/attendance", label: "Attendance", icon: "attendance" },
     { to: "/app/calendar", label: "Calendar", icon: "calendar" },
+    { to: "/app/leave-apply", label: "Leave Apply", icon: "attendance" },
     { to: "/app/reports", label: "Reports", icon: "reports" },
     { to: "/app/raise-comment", label: "Raise Comment", icon: "tickets" },
     { to: "/app/settings", label: "Settings", icon: "settings" },

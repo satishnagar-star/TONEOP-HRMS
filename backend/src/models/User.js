@@ -20,9 +20,9 @@ const userSchema = new mongoose.Schema(
     password: { type: String, required: true },
     leave_balance: { type: Number, default: 2 },
     total_late_minutes: { type: Number, default: 90 },
-    lastLeaveAccrualMonth: { type: String }, // YYYY-MM
-    lastLateResetMonth: { type: String },    // YYYY-MM
-    leaveResetYear: { type: Number },        // YYYY
+    lastLeaveAccrualMonth: { type: String, default: "" }, // format: YYYY-MM
+    lastLateResetMonth: { type: String, default: "" },    // format: YYYY-MM
+    leaveResetYear: { type: Number, default: new Date().getFullYear() },
   },
   { timestamps: true }
 );
